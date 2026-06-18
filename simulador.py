@@ -92,11 +92,11 @@ class RedElectrica:
                 self.siguiente = EstadoRed.NORMAL
 
         elif self.estado == EstadoRed.BAJON:
-            self.cambio_en = ahora + random.uniform(600, 3600)
+            self.cambio_en = ahora + random.uniform(3, 8)
             self.siguiente = EstadoRed.NORMAL
 
         elif self.estado == EstadoRed.APAGON:
-            self.cambio_en = ahora + random.uniform(7200, 28800)
+            self.cambio_en = ahora + random.uniform(16200, 19800)
             self.siguiente = EstadoRed.RECUPERACION
 
         elif self.estado == EstadoRed.RECUPERACION:
