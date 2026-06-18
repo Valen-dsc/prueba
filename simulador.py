@@ -3,21 +3,22 @@ SIMULADOR ESP32 — El Morichal (HTTP POST a Railway)
 =====================================================
 Simula el comportamiento del sistema eléctrico venezolano:
 
-  NORMAL ──→ BAJÓN (85-105V, 5-60 min) ──→ NORMAL
-     │                                          ↑
-     └──→ APAGÓN (0V, 1-10 h) → RECUPERACIÓN ──┘
-                                (picos 130-155V, 2-15 min)
+Programación diaria:
+  - Bajones: 1-2 por día (a veces 3)
+  - Apagón: día sí, día no (2-8 h)
+  - Recuperación: picos inestables al restablecer
 
-Los tiempos y eventos buscan reflejar la realidad del país:
-largos períodos estables, bajones en horas pico, apagones
-que duran horas, y picos peligrosos al restablecer.
+Ciclo típico en día de apagón:
+  NORMAL (1-3 h) → BAJÓN (10-60 min) → NORMAL → BAJÓN →
+  NORMAL → APAGÓN (2-8 h) → RECUPERACIÓN (2-15 min) → NORMAL
 """
 
 import asyncio
 import logging
 import os
 import random
-from datetime import datetime, timezone, timedelta
+import time
+from datetime import datetime, timezone
 from enum import Enum
 
 import httpx
@@ -34,140 +35,132 @@ INTERVALO = int(os.getenv("INTERVALO", "5"))
 
 
 class EstadoRed(Enum):
-    """Estados del sistema eléctrico venezolano."""
-    NORMAL = "NORMAL"             # 120V ±2%, estable
-    BAJON = "BAJON"               # 85-105V sostenido
-    APAGON = "APAGON"             # 0V
-    RECUPERACION = "RECUPERACION"  # Post-apagón, inestable con picos
+    NORMAL = "NORMAL"
+    BAJON = "BAJON"
+    APAGON = "APAGON"
+    RECUPERACION = "RECUPERACION"
 
 
 class RedElectrica:
     """
-    Simula una red eléctrica realista.
-    Es singleton - una sola instancia para todos los equipos.
+    Red eléctrica con programación diaria realista.
+
+    - Día par → apagón programado (ocurre tras los bajones del día)
+    - Día impar → sin apagón, solo bajones
+    - Bajones: 1-2 por día (a veces 3, a veces ninguno)
     """
 
     def __init__(self):
         self.estado = EstadoRed.NORMAL
-        self._reiniciar_timer()
+        self.cambio_en = time.time() + 10
+        self.siguiente = EstadoRed.NORMAL
+        self.dia_num = -1
+        self.apagon_pendiente = False
+        self.bajones_pendientes = 0
+        self._iniciar_dia()
+        self._programar()
 
-    def _reiniciar_timer(self):
+    def _iniciar_dia(self):
+        dia = int(time.time()) // 86400
+        if dia == self.dia_num:
+            return
+        self.dia_num = dia
+        self.bajones_pendientes = random.choices([0, 1, 2, 3], weights=[0.1, 0.4, 0.4, 0.1])[0]
+        self.apagon_pendiente = (dia % 2 == 0)
+        if self.apagon_pendiente:
+            logger.info(f"📅 Día {dia}: apagón PROGRAMADO, ~{self.bajones_pendientes} bajón(es)")
+        else:
+            logger.info(f"📅 Día {dia}: sin apagón, ~{self.bajones_pendientes} bajón(es)")
+
+    def _programar(self):
         ahora = time.time()
+        self._iniciar_dia()
+
         if self.estado == EstadoRed.NORMAL:
-            self.cambio_en = ahora + random.uniform(600, 10800)  # 10 min - 3 h
-            self.v_base = 120.0
-            self.ruido = 1.5
+            if self.bajones_pendientes > 0:
+                self.bajones_pendientes -= 1
+                logger.info(f"  ↳ Próximo bajón en ~1-3 h  (quedan {self.bajones_pendientes})")
+                self.cambio_en = ahora + random.uniform(3600, 10800)
+                self.siguiente = EstadoRed.BAJON
+            elif self.apagon_pendiente:
+                self.apagon_pendiente = False
+                logger.info(f"  ↳ APAGÓN programado en ~30 min - 2 h")
+                self.cambio_en = ahora + random.uniform(1800, 7200)
+                self.siguiente = EstadoRed.APAGON
+            else:
+                self.cambio_en = ahora + random.uniform(3600, 14400)
+                self.siguiente = EstadoRed.NORMAL
+
         elif self.estado == EstadoRed.BAJON:
-            self.cambio_en = ahora + random.uniform(300, 3600)   # 5 min - 1 h
-            self.v_base = random.uniform(85, 105)
-            self.ruido = 3.0
+            self.cambio_en = ahora + random.uniform(600, 3600)
+            self.siguiente = EstadoRed.NORMAL
+
         elif self.estado == EstadoRed.APAGON:
-            self.cambio_en = ahora + random.uniform(3600, 36000) # 1 - 10 h
-            self.v_base = 0.0
-            self.ruido = 0.0
+            self.cambio_en = ahora + random.uniform(7200, 28800)
+            self.siguiente = EstadoRed.RECUPERACION
+
         elif self.estado == EstadoRed.RECUPERACION:
-            self.cambio_en = ahora + random.uniform(120, 900)    # 2 - 15 min
-            self.v_base = 120.0
-            self.ruido = 6.0
+            self.cambio_en = ahora + random.uniform(120, 900)
+            self.siguiente = EstadoRed.NORMAL
 
     def _transicionar(self):
-        if self.estado == EstadoRed.NORMAL:
-            r = random.random()
-            if r < 0.003:
-                logger.warning("⚡ ¡APAGÓN! Red fuera de servicio")
-                self.estado = EstadoRed.APAGON
-            elif r < 0.04:
-                logger.info(f"⚠️  Bajón de voltaje — red debilitada")
-                self.estado = EstadoRed.BAJON
-            else:
-                self.estado = EstadoRed.NORMAL
-
-        elif self.estado == EstadoRed.BAJON:
-            if random.random() < 0.05:
-                logger.warning("⚡ Bajón empeora — APAGÓN")
-                self.estado = EstadoRed.APAGON
-            else:
-                logger.info(f"✅ Red restablecida tras bajón")
-                self.estado = EstadoRed.NORMAL
-
-        elif self.estado == EstadoRed.APAGON:
-            logger.warning("⚡ LUZ RESTAURADA — Recuperación inestable")
-            self.estado = EstadoRed.RECUPERACION
-
+        self.estado = self.siguiente
+        if self.estado == EstadoRed.APAGON:
+            logger.warning("⚡ ¡APAGÓN! Red fuera de servicio")
         elif self.estado == EstadoRed.RECUPERACION:
-            logger.info("✅ Red estable después de recuperación")
-            self.estado = EstadoRed.NORMAL
-
-        self._reiniciar_timer()
+            logger.warning("⚡ LUZ RESTAURADA — Recuperación inestable")
+        elif self.estado == EstadoRed.BAJON:
+            logger.warning("⚠️  Bajón de voltaje — red debilitada")
+        elif self.estado == EstadoRed.NORMAL and self.siguiente != EstadoRed.NORMAL:
+            pass
+        self._programar()
 
     def generar_lectura(self) -> tuple[dict, str, bool]:
-        """
-        Genera una lectura según el estado actual de la red.
-        Retorna: (linea: dict, calidad: str, es_fluctuacion: bool)
-        """
         ahora = time.time()
         if ahora >= self.cambio_en:
             self._transicionar()
 
         if self.estado == EstadoRed.APAGON:
             v = 0.0
-            c = 0.0
-            p = 0.0
             calidad = "CRITICA"
             es_fluctuacion = True
 
         elif self.estado == EstadoRed.BAJON:
-            v = self.v_base + random.gauss(0, self.ruido)
-            v = max(v, 60.0)  # no baja de 60V
-            # Micro-caídas dentro del bajón
+            v = random.uniform(85, 105)
             if random.random() < 0.03:
                 v -= random.uniform(5, 15)
-            c = random.uniform(0.5, 8.0)
-            p = v * c
             calidad = "ADVERTENCIA"
             es_fluctuacion = True
 
         elif self.estado == EstadoRed.RECUPERACION:
-            # Voltaje inestable con picos peligrosos
             if random.random() < 0.06:
-                # Pico de hasta 155V al restablecer
                 v = 120 + random.uniform(15, 35)
                 calidad = "CRITICA"
             elif random.random() < 0.04:
-                # Micro-caída post-recuperación
                 v = 120 - random.uniform(20, 40)
                 calidad = "CRITICA"
-            elif abs((120 + random.gauss(0, self.ruido)) - 120) > 15:
-                v = 120 + random.gauss(0, self.ruido)
+            elif random.random() < 0.10:
+                v = 120 + random.uniform(8, 15)
                 calidad = "ADVERTENCIA"
             else:
-                v = 120 + random.gauss(0, self.ruido)
+                v = 120 + random.gauss(0, 6)
                 calidad = "ESTABLE"
             v = max(min(v, 160), 0)
-            c = random.uniform(0.5, 10.0)
-            p = v * c
             es_fluctuacion = calidad != "ESTABLE"
 
         else:  # NORMAL
-            v = self.v_base + random.gauss(0, self.ruido)
-            c = random.uniform(0.5, 5.0)
-            p = v * c
+            v = 120 + random.gauss(0, 1.5)
             calidad = "ESTABLE"
             es_fluctuacion = False
 
-        linea = {
+        return {
             "voltaje": round(max(v, 0), 2),
-            "corriente": round(max(c, 0), 2),
-            "potencia": round(max(p, 0), 2),
-        }
-        return linea, calidad, es_fluctuacion
+            "corriente": round(0, 2),
+            "potencia": round(0, 2),
+        }, calidad, es_fluctuacion
 
 
-# Instancia global de la red (compartida entre equipos)
 red = RedElectrica()
-
-
-_estados_motor = {}
 
 
 def _tiene_motor(nombre: str, tipo: str) -> bool:
@@ -176,50 +169,39 @@ def _tiene_motor(nombre: str, tipo: str) -> bool:
 
 
 def simular_lectura(equipo: dict) -> dict:
-    """
-    Genera una lectura realista para el equipo dados el estado de la red
-    y las características particulares del equipo (motor, etc.).
-    """
     eid = equipo["id"]
     p_nom = float(equipo.get("potencia_nominal_watts", 500))
     i_max = float(equipo.get("corriente_maxima_segura", 999))
 
     linea, calidad, es_fluctuacion = red.generar_lectura()
     v = linea["voltaje"]
-    c = linea["corriente"]
-    p = linea["potencia"]
 
-    # Equipos con motor: arranque violento cuando vuelve la luz
-    if _tiene_motor(equipo.get("nombre_equipo", ""), equipo.get("tipo", "")):
-        if red.estado == EstadoRed.RECUPERACION and random.random() < 0.10:
-            pico_corriente = c * random.uniform(3, 6)
-            c = min(pico_corriente, i_max * 2)
-            p = v * c
-            linea["corriente"] = round(c, 2)
-            linea["potencia"] = round(p, 2)
+    if v == 0:
+        c = 0.0
+        p = 0.0
+        calidad = "CRITICA"
+        es_fluctuacion = True
+    else:
+        c = p_nom / v if p_nom > 0 else random.uniform(0.5, 5.0)
+        c += random.gauss(0, 0.15 * c)
+        c = max(c, 0.1)
+
+        if _tiene_motor(equipo.get("nombre_equipo", ""), equipo.get("tipo", "")):
+            if red.estado == EstadoRed.RECUPERACION and random.random() < 0.10:
+                c *= random.uniform(3, 6)
+                logger.info(f"  [{eid}] ⚡ ARRANQUE compresor/motor — {c:.1f}A")
+
+        if c > i_max * 1.3:
+            calidad = "CRITICA"
+            es_fluctuacion = True
+        elif c > i_max and calidad == "ESTABLE":
             calidad = "ADVERTENCIA"
             es_fluctuacion = True
-            logger.info(f"  [{eid}] ⚡ ARRANQUE compresor/motor — {c:.1f}A")
 
-    # Ajustar corriente según potencia nominal
-    if p_nom > 0 and v > 0:
-        c_esperada = p_nom / v
-        variacion = random.gauss(0, 0.15 * c_esperada)
-        c = max(c_esperada + variacion, 0.1)
         p = v * c
-        linea["corriente"] = round(c, 2)
-        linea["potencia"] = round(p, 2)
 
-    # Verificar umbrales del equipo
-    if v == 0:
-        calidad = "CRITICA"
-        es_fluctuacion = True
-    elif c > i_max * 1.3:
-        calidad = "CRITICA"
-        es_fluctuacion = True
-    elif c > i_max and calidad == "ESTABLE":
-        calidad = "ADVERTENCIA"
-        es_fluctuacion = True
+    linea["corriente"] = round(c, 2)
+    linea["potencia"] = round(p, 2)
 
     return {
         "electrodomestico_id": eid,
@@ -231,7 +213,6 @@ def simular_lectura(equipo: dict) -> dict:
 
 async def cargar_equipos():
     import asyncpg
-
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         rows = await conn.fetch(
@@ -282,7 +263,7 @@ async def main():
     logger.info("=" * 50)
     logger.info("SIMULADOR ELÉCTRICO — Venezuela")
     logger.info("Modo: HTTP POST a %s", BACKEND_URL)
-    logger.info("Estados: NORMAL → BAJÓN/APAGÓN → RECUPERACIÓN → NORMAL")
+    logger.info("Ciclo: NORMAL → BAJÓN → APAGÓN (día sí/no) → RECUPERACIÓN")
     logger.info("=" * 50)
 
     if not DATABASE_URL:
