@@ -211,8 +211,17 @@ async def main():
     await asyncio.gather(*tareas)
 
 
+async def run_forever():
+    """Wrapper que maneja cancelación graceful."""
+    try:
+        await main()
+    except asyncio.CancelledError:
+        logger.info("Simulador detenido.")
+        # Re-raise to properly cancel subtasks
+        raise
+
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
+        asyncio.run(run_forever())
+    except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Simulador detenido.")
