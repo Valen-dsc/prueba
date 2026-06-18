@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("simulador")
 
-BACKEND_URL = "http://proyecto-valentina-production.up.railway.app"
+BACKEND_URL = "https://proyecto-valentina-production.up.railway.app"
 DATABASE_URL = os.getenv("DATABASE_URL")
 INTERVALO = int(os.getenv("INTERVALO", "5"))
 DURACION_APAGON_HORAS = int(os.getenv("DURACION_APAGON_HORAS", "5"))
